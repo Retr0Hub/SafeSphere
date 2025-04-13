@@ -1,0 +1,381 @@
+#include <TinyGPS++.h>
+// Define serial communication
+#define SerialMon Serial       // For debugging
+#define SerialAT Serial2       // For EC200U-CN communication
+#define MODEM_BAUDRATE 115200  // Modem communication baud rate
+#define RXD2 16
+#define TXD2 17
+#define ESP32_CAM_TRIGGER 5
+double Lat = 0.00000000;       //variable for lattitude
+double Lot = 0.00000000;       //variable for longitude
+double LatInitial;       //variable for lattitude
+double LotInitial;       //variable for longitude  
+const byte InputPin_A = 23;
+const byte InputPin_B = 22;
+const byte ledPin = 19;
+const byte OutputPin_B = 21;
+const int buzzerPin = 21; // Buzzer pin, assuming it's connected to pin 10
+const byte ResetPin = 32;
+
+boolean InputWasLOW_A = false;
+boolean InputWasLOW_B = false;
+boolean InputWasLOW_C = false;
+unsigned long alarmStateChangeTS;
+
+unsigned ALARM_INTERVAL = 1000;
+unsigned SMS_INTERVAL = 60000;
+
+unsigned long lastSMSSentTime;
+
+boolean smsWithAlarm = false;
+boolean smsWithoutAlarm = false;
+boolean isAlarmOn = false;
+boolean smsSent = false;
+boolean isDefaultLoc = false;
+
+boolean inputIsLOW_A = false;
+boolean inputIsLOW_B = false;
+boolean inputIsLOW_C = false;
+
+unsigned long InputLastChangeTime_A;
+unsigned long InputLastChangeTime_B;
+unsigned long InputLastChangeTime_C;
+//String number[4] = {"9830016394", "9073681166", "9830259307", "8100048081"};
+String number[4] = {"8900447713", "6289399859", "9733590204", "9830016394"};
+//const char phoneNumber[] = "9830016394";                             // Replace with the recipient's phone number
+//const char message[] = "Hello, this is a test message from EC200U!";  // SMS message
+String latitude = "";
+String longitude = "";
+
+unsigned long previousMillis = 0;    // Store the last time the buzzer state changed
+const long beepIntervalOn = 200;     // Time buzzer stays ON in milliseconds
+const long beepIntervalOff = 800;    // Time buzzer stays OFF in milliseconds
+bool buzzerState = false;            // Track whether the buzzer is ON or OFF
+
+void setup() {
+  pinMode(InputPin_A, INPUT);
+  pinMode(InputPin_B, INPUT);
+  pinMode(ledPin, OUTPUT);
+  pinMode(OutputPin_B, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);         // Set the buzzer pin as OUTPUT
+  pinMode(ResetPin, INPUT);
+  pinMode(ESP32_CAM_TRIGGER, OUTPUT);
+  digitalWrite(ESP32_CAM_TRIGGER, LOW);
+  //digitalWrite(buzzerPin, HIGH);
+  //delay(20000);
+
+  Serial.begin(115200);
+  delay(100);
+  delay(100);
+  // Start Serial for debug
+  SerialMon.begin(115200); 
+  // while (!SerialMon) {}
+
+  // Initialize Serial for EC200U-CN
+  SerialAT.begin(MODEM_BAUDRATE, SERIAL_8N1, RXD2, TXD2);
+  delay(1000);
+
+  SerialMon.println("Initializing modem...");
+  modem_init();  // Send initialization commands
+
+  SerialMon.println("Initializing GPS...");
+
+  // Turn off GPS (if previously on)
+  sendATCommand("AT+QGPSEND");
+  delay(2000);  // Ensure GPS is off
+
+  // Start GPS
+  sendATCommand("AT+QGPS=1");
+  delay(10000);  // Wait for GPS to initialize
+}
+
+void loop() {
+  // Nothing to do in the loop
+  unsigned long currentMillis = millis();
+  int inputPinA = digitalRead(InputPin_A);
+  int inputPinB = digitalRead(InputPin_B);
+  int inputPinC = digitalRead(ResetPin);
+
+  inputIsLOW_A = inputPinA == LOW;
+  inputIsLOW_B = inputPinB == LOW;
+  inputIsLOW_C = inputPinC == LOW;
+
+  // SerialMon.print("inputIsLOW_A = ");
+  // SerialMon.println(inputIsLOW_A);
+  // SerialMon.print("inputIsLOW_B = ");
+  // SerialMon.println(inputIsLOW_B);
+  // SerialMon.print("inputIsLOW_C = ");
+  // SerialMon.println(inputIsLOW_C);
+  
+  SerialAT.println("AT+QGPSLOC=2");
+  //delay(2000);  // Short wait for a response
+
+  String response = readATResponse();
+  //SerialMon.println("response.indexOf = " + response.indexOf("+QGPSLOC:"));
+  if (response.indexOf("+QGPSLOC:") >= 0) {
+    parseAndPrintLocation(response);
+  } else {
+    //SerialMon.println("No valid GPS data available yet.");
+  }
+
+  if (inputIsLOW_A && !InputWasLOW_A) {
+    InputLastChangeTime_A = currentMillis;
+    InputWasLOW_A = inputIsLOW_A;
+  }
+  if (inputIsLOW_B && !InputWasLOW_B) {
+    InputLastChangeTime_B = currentMillis;
+    InputWasLOW_B = inputIsLOW_B;
+  }
+  if (inputIsLOW_C && !InputWasLOW_C) {
+    InputLastChangeTime_C = currentMillis;
+    InputWasLOW_C = inputIsLOW_C;
+  }
+  
+  if (smsWithAlarm || checkButtonPressInterval("BTN_ALARM", 3)) {
+    InputWasLOW_A = inputIsLOW_A;
+     /*if (!isAlarmOn && currentMillis - alarmStateChangeTS > 1000) {
+      Serial.println("ledPin HIGH");
+      Serial.println("OutputPin_B HIGH");
+      digitalWrite(ledPin, HIGH);
+      digitalWrite(OutputPin_B, HIGH);
+      alarmStateChangeTS = currentMillis;
+      isAlarmOn = true;
+    }
+    if (isAlarmOn && currentMillis - alarmStateChangeTS > 1000) {
+      digitalWrite(ledPin, LOW);
+      digitalWrite(OutputPin_B, LOW);
+      alarmStateChangeTS = currentMillis;
+      isAlarmOn = false;
+    }*/
+    boolean isDefaultLoc = false;
+  
+    if (latitude.equals("") && longitude.equals("")) {
+
+      latitude = "19.130689"; 
+      longitude = "72.916400";
+      isDefaultLoc = true;
+    }
+    String SMS = "I am in trouble!\n http://www.google.com/maps/place/" + String(latitude) + "," + String(longitude);
+    digitalWrite(ESP32_CAM_TRIGGER, HIGH);
+    beepBuzzer(currentMillis); // Call buzzer control function
+    SerialMon.println("Sending SMS...");
+    SendMessage(SMS);
+    
+    smsWithAlarm = true;
+  }
+  if (smsWithoutAlarm || checkButtonPressInterval("BTN_DISCRETE", 3)) {
+    InputWasLOW_B = inputIsLOW_B;
+    boolean isDefaultLoc = false;
+    if (latitude.equals("") && longitude.equals("")) {
+      latitude = "19.130689"; 
+      longitude = "72.916400";
+      isDefaultLoc = true;
+    }
+    String SMS = "I am in trouble!\n http://www.google.com/maps/place/" + String(latitude) + "," + String(longitude);
+    SerialMon.println("Sending SMS...");
+    digitalWrite(ESP32_CAM_TRIGGER, HIGH);
+    SendMessage(SMS);
+    smsWithoutAlarm = true;
+
+  }
+  if (checkButtonPressInterval("BTN_RESET", 3)) {
+    InputWasLOW_C = inputIsLOW_C;
+    smsWithoutAlarm = false;
+    smsWithAlarm = false;
+    inputIsLOW_A = false;
+    inputIsLOW_B = false;
+    inputIsLOW_C = false;
+    smsSent = false;
+    digitalWrite(ESP32_CAM_TRIGGER, LOW);
+    digitalWrite(ledPin, LOW);
+    digitalWrite(buzzerPin, LOW);   // Turn the buzzer OFF
+    Serial.println("resetting alarm");
+  }
+
+}
+String readATResponse() {
+  String response = "";
+  long timeout = millis() + 3000;  // 3-second timeout for reading the response
+
+  while (millis() < timeout) {
+    while (SerialAT.available()) {
+      char c = SerialAT.read();
+      response += c;
+    }
+    if (response.length() > 0) break;  // Stop reading if response is received
+  }
+  response = response.substring(2);
+  //SerialMon.println("Raw Response: " + response);
+  return response;
+
+}
+
+
+void parseAndPrintLocation(const String &response) {
+  // Example response: +QGPSLOC: 105824.00,22.5726,N,88.3639,E,10.5,0.0,0.0,230394,03
+  int firstComma = response.indexOf(',');                   // Find the first comma
+  int secondComma = response.indexOf(',', firstComma + 1);  // Find the second comma
+  int thirdComma = response.indexOf(',', secondComma + 1);  // Find the third comma
+
+  if (firstComma != -1 && secondComma != -1 && thirdComma != -1) {
+    latitude = response.substring(firstComma + 1, secondComma);
+    longitude = response.substring(secondComma + 1, thirdComma);
+
+    //SerialMon.println("Latitude: " + latitude);
+    //SerialMon.println("Longitude: " + longitude);
+  } else {
+    SerialMon.println("Failed to parse GPS data.");
+  }
+}
+
+void modem_init() {
+
+  sendATCommand("AT");         // Basic AT command to check communication
+  sendATCommand("ATE0");       // Disable echo for cleaner responses
+  sendATCommand("AT+CPIN?");   // Check SIM status
+  sendATCommand("AT+CSQ");     // Check signal quality
+  sendATCommand("AT+CREG?");   // Check network registration status
+  sendATCommand("AT+CGATT?");  // Check if GPRS is attached
+}
+boolean CheckDistance() {
+  double latIni = LatInitial;
+  double lotIni = LotInitial;
+  double distance = TinyGPSPlus::distanceBetween(latIni, lotIni, Lat, Lot);
+  Serial.flush();
+  return distance > 10;
+}
+
+void SendMessage(String SMS) {
+
+  if (smsSent) {
+    //Serial.println("CHECKING DISTANCE!!!");
+    if (!CheckDistance()) {
+      //Serial.println("Returning without sending message!!");
+      return;
+    }
+  }
+  
+  Lat = latitude.toDouble();
+  Lot = longitude.toDouble();
+  LatInitial = Lat;
+  LotInitial = Lot;
+
+  Serial.println ("Sending Message");
+  SerialAT.begin(115200, SERIAL_8N1, RXD2, TXD2);
+  delay(100);
+
+
+  for(int i = 0; i < 4; i++) {
+    Serial.println("Sending SMS to: @@" + number[i] + "@@");
+    sendATCommand("AT+CMGF=1");                                // Set SMS text mode
+    sendATCommand(String("AT+CMGS=\"") + number[i] + "\"");  // Set recipient
+    SerialAT.print(SMS);
+    SerialAT.write(0x1A);  // End of message with Ctrl+Z  }
+    delay(100);
+  }
+  delay(100);
+
+  if(isDefaultLoc) {
+    Lat = 19.130689; 
+    Lot = 72.916400;
+  }
+  //sendWhatsAppMessage(SMS);
+  smsSent = true;
+  Serial.println(SMS);
+}
+void sendATCommand(const String &command) {
+  SerialMon.print("Sending: ");
+  SerialMon.println(command);
+  SerialAT.println(command);
+  delay(1000);  // Wait for response
+
+  // Read and display the response
+  while (SerialAT.available()) {
+    String response = SerialAT.readString();
+    SerialMon.print("Response: ");
+    SerialMon.println(response);
+  }
+}
+void beepBuzzer(unsigned long currentMillis) {
+  //Serial.println("Inside beepBuzzer");
+  // Control buzzer beeping by alternating ON and OFF states based on time intervals
+  SerialMon.print("buzzerState: ");
+  SerialMon.println(buzzerState);
+  SerialMon.print("currentMillis: ");
+  SerialMon.println(currentMillis);
+  SerialMon.print("previousMillis: ");
+  SerialMon.println(previousMillis);
+  SerialMon.print("currentMillis - previousMillis: ");
+  SerialMon.println(currentMillis - previousMillis);
+  if (buzzerState) {
+    Serial.println("Inside if");
+    // If the buzzer is ON, check if the ON time has passed
+    if (currentMillis - previousMillis >= beepIntervalOn) {
+      Serial.println("SIUUUUUUU");
+      digitalWrite(ledPin, LOW);
+      digitalWrite(buzzerPin, LOW);   // Turn the buzzer OFF
+      previousMillis = currentMillis; // Reset the timer
+      buzzerState = false;            // Set the buzzer state to OFF
+    }
+  } else {
+     Serial.println("Inside else");
+   
+    // If the buzzer is OFF, check if the OFF time has passed
+    if (currentMillis - previousMillis >= beepIntervalOff) {
+       Serial.println("BUZZER LED CHECK");
+     
+      digitalWrite(ledPin, HIGH);
+      digitalWrite(buzzerPin, HIGH);  // Turn the buzzer ON
+      previousMillis = currentMillis; // Reset the timer
+      buzzerState = true;             // Set the buzzer state to ON
+    }
+  }
+}
+boolean checkButtonPressInterval(String btnName, int btnPressIntervalSec) {
+  unsigned long currentMillis = millis();
+  if (btnName.equals("BTN_ALARM")) {
+    //Serial.println("Checking for BTN_ALARM");
+/*    Serial.print("inputIsLOW_A = ");
+    Serial.println(inputIsLOW_A);
+    Serial.print("InputWasLOW_A = ");
+    Serial.println(InputWasLOW_A);
+    Serial.print("currentMillis = ");
+    Serial.println(currentMillis);
+    Serial.print("InputLastChangeTime_A = ");
+    Serial.println(InputLastChangeTime_A);*/
+    
+    if (inputIsLOW_A != InputWasLOW_A && currentMillis - InputLastChangeTime_A >= btnPressIntervalSec * 1000) {
+      InputLastChangeTime_A = currentMillis;
+      InputWasLOW_A = inputIsLOW_A;
+      Serial.println("Returning TRUE for BTN_ALARM");
+      return true;
+    }
+  }
+  if (btnName.equals("BTN_DISCRETE")) {
+    //Serial.println("DISCRETE");
+    //Serial.println("Checking for BTN_DISCRETE");
+/*    Serial.print("inputIsLOW_B = ");
+    Serial.println(inputIsLOW_B);
+    Serial.print("InputWasLOW_B = ");
+    Serial.println(InputWasLOW_B);
+    Serial.print("currentMillis = ");
+    Serial.println(currentMillis);
+    Serial.print("InputLastChangeTime_B = ");
+    Serial.println(InputLastChangeTime_B);*/
+    if (inputIsLOW_B != InputWasLOW_B && currentMillis - InputLastChangeTime_B >= btnPressIntervalSec * 1000) {
+      InputLastChangeTime_B = currentMillis;
+      InputWasLOW_B = inputIsLOW_B;
+      Serial.println("Returning TRUE for BTN_DISCRETE");
+      return true;
+    }
+  }
+  if (btnName.equals("BTN_RESET")) {
+   if (inputIsLOW_C != InputWasLOW_C && currentMillis - InputLastChangeTime_C >= btnPressIntervalSec * 1000) {
+      InputLastChangeTime_C = currentMillis;
+      InputWasLOW_C = inputIsLOW_C;
+      Serial.println("Returning TRUE for BTN_RESET");
+      return true;
+    }
+  }
+  return false;
+}
